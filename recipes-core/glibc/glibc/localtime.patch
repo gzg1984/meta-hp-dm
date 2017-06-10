@@ -1,0 +1,23 @@
+diff -uprN git/time/localtime.c git.new/time/localtime.c
+--- git/time/localtime.c	2017-06-06 13:47:12.223217601 -0400
++++ git.new/time/localtime.c	2017-06-06 13:48:54.184025379 -0400
+@@ -31,11 +31,19 @@ __localtime_r (const time_t *t, struct t
+ }
+ weak_alias (__localtime_r, localtime_r)
+ 
++#include <sys/types.h>
++#include <unistd.h>
++#include <sys/syscall.h>
++#include <sys/types.h>
++#include <signal.h>
++#include <stdio.h>
++ 
+ 
+ /* Return the `struct tm' representation of *T in local time.  */
+ struct tm *
+ localtime (const time_t *t)
+ {
++    printf("tid[%d]\n",  syscall(SYS_gettid));
+   return __tz_convert (t, 1, &_tmbuf);
+ }
+ libc_hidden_def (localtime)

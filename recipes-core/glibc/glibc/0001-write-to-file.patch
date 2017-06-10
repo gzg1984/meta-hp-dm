@@ -1,0 +1,43 @@
+From 6673f3e73ccc107d1efcb104c5138fe6eb4cb69a Mon Sep 17 00:00:00 2001
+From: Gao Zhi Gang <zggao@suse.com>
+Date: Thu, 8 Jun 2017 20:46:02 -0400
+Subject: [PATCH]  write to file
+
+---
+ time/localtime.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/time/localtime.c b/time/localtime.c
+index 07dd67ca71..1efa4f6082 100644
+--- a/time/localtime.c
++++ b/time/localtime.c
+@@ -30,12 +30,26 @@ __localtime_r (const time_t *t, struct tm *tp)
+   return __tz_convert (t, 1, tp);
+ }
+ weak_alias (__localtime_r, localtime_r)
++#include <sys/types.h>
++#include <unistd.h>
++#include <sys/syscall.h>
++#include <sys/types.h>
++#include <signal.h>
++#include <stdio.h>
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++
++
++
+ 
+ 
+ /* Return the `struct tm' representation of *T in local time.  */
+ struct tm *
+ localtime (const time_t *t)
+ {
++	static int fd=0; if(!fd) {fd=open("/localtime.log",O_WRONLY|O_APPEND|O_CREAT,S_IRWXU|S_IRWXG|S_IRWXO);}
++    write(fd,"tid[%ld]\n",  syscall(__NR_gettid));
+   return __tz_convert (t, 1, &_tmbuf);
+ }
+ libc_hidden_def (localtime)
+-- 
+2.12.0
+

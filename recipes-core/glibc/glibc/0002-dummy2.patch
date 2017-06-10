@@ -1,0 +1,1841 @@
+From 03e82bdd0d62528051c7873c714a798316ad296e Mon Sep 17 00:00:00 2001
+From: Gao Zhi Gang <zggao@suse.com>
+Date: Wed, 7 Jun 2017 09:28:06 -0400
+Subject: [PATCH 2/2] dummy2
+
+---
+ Makefile                                           |  22 +++-
+ Makerules                                          |  42 ++++++-
+ configure                                          |   2 +-
+ configure.ac                                       |   2 +-
+ elf/dl-deps.c                                      |  14 ++-
+ elf/ldd.bash.in                                    |   2 +-
+ elf/readlib.c                                      |   1 +
+ iconv/gconv_charset.h                              |   2 +-
+ locale/Makefile                                    |   3 +-
+ locale/gen-translit.pl                             |   2 +-
+ locale/localeinfo.h                                |   2 +-
+ locale/programs/charmap-dir.c                      |   6 +
+ locale/programs/config.h                           |   3 +
+ locale/programs/ld-collate.c                       |  17 ++-
+ locale/programs/ld-ctype.c                         |  27 ++--
+ locale/programs/ld-time.c                          |  31 +++--
+ locale/programs/linereader.c                       |   2 +-
+ locale/programs/localedef.c                        |   8 ++
+ locale/programs/locfile.c                          |   5 +-
+ locale/programs/locfile.h                          |  59 ++++++++-
+ locale/setlocale.c                                 |  30 -----
+ manual/Makefile                                    |   3 +-
+ nscd/nscd.init                                     |  14 +--
+ resolv/res_libc.c                                  |  14 ++-
+ scripts/config.guess                               | 140 +++++++++------------
+ scripts/config.sub                                 |  47 +++----
+ sysdeps/aarch64/configure                          |   4 +-
+ sysdeps/aarch64/configure.ac                       |   4 +-
+ sysdeps/arm/configure                              |   4 +-
+ sysdeps/arm/configure.ac                           |   4 +-
+ sysdeps/arm/dl-machine.h                           |   2 +-
+ sysdeps/gnu/configure                              |   2 +-
+ sysdeps/gnu/configure.ac                           |   2 +-
+ sysdeps/mips/configure                             |   4 +-
+ sysdeps/mips/configure.ac                          |   4 +-
+ sysdeps/nios2/configure                            |   4 +-
+ sysdeps/nios2/configure.ac                         |   4 +-
+ sysdeps/unix/sysv/linux/mips/configure             |   4 +-
+ sysdeps/unix/sysv/linux/mips/configure.ac          |   4 +-
+ sysdeps/unix/sysv/linux/powerpc/dl-sysdep.c        |  14 ++-
+ sysdeps/unix/sysv/linux/powerpc/libc-start.c       |  16 ++-
+ .../unix/sysv/linux/powerpc/powerpc64/configure    |   8 +-
+ .../unix/sysv/linux/powerpc/powerpc64/configure.ac |   8 +-
+ sysdeps/unix/sysv/linux/sh/Versions                |   1 +
+ sysdeps/unix/sysv/linux/sh/sysdep.S                |  11 ++
+ time/localtime.c                                   |   1 +
+ timezone/Makefile                                  |   2 +-
+ timezone/tzselect.ksh                              |   2 +-
+ 48 files changed, 371 insertions(+), 238 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 425cb796db..bb44faa102 100644
+--- a/Makefile
++++ b/Makefile
+@@ -70,9 +70,18 @@ subdir-dirs = include
+ vpath %.h $(subdir-dirs)
+ 
+ # What to install.
+-install-others = $(inst_includedir)/gnu/stubs.h
+ install-bin-script =
+ 
++# If we're bootstrapping, install a dummy gnu/stubs.h along with the
++# other headers, so 'make install-headers' produces a useable include
++# tree.  Otherwise, install gnu/stubs.h later, after the rest of the
++# build is done.
++ifeq ($(install-bootstrap-headers),yes)
++install-headers: $(inst_includedir)/gnu/stubs.h
++else
++install-others = $(inst_includedir)/gnu/stubs.h
++endif
++
+ ifeq (yes,$(build-shared))
+ headers += gnu/lib-names.h
+ endif
+@@ -152,6 +161,16 @@ others: $(common-objpfx)testrun.sh
+ 
+ subdir-stubs := $(foreach dir,$(subdirs),$(common-objpfx)$(dir)/stubs)
+ 
++# gnu/stubs.h depends (via the subdir 'stubs' targets) on all the .o
++# files in EGLIBC.  For bootstrapping a GCC/EGLIBC pair, an empty
++# gnu/stubs.h is good enough.
++ifeq ($(install-bootstrap-headers),yes)
++$(inst_includedir)/gnu/stubs.h: include/stubs-bootstrap.h $(+force)
++	$(make-target-directory)
++	$(INSTALL_DATA) $< $@
++
++installed-stubs =
++else
+ ifndef abi-variants
+ installed-stubs = $(inst_includedir)/gnu/stubs.h
+ else
+@@ -178,6 +197,7 @@ $(inst_includedir)/gnu/stubs.h: $(+force)
+ 
+ install-others-nosubdir: $(installed-stubs)
+ endif
++endif
+ 
+ 
+ # Since stubs.h is never needed when building the library, we simplify the
+diff --git a/Makerules b/Makerules
+index e9194e54cf..ab0692f9be 100644
+--- a/Makerules
++++ b/Makerules
+@@ -762,6 +762,9 @@ ifeq ($(build-shared),yes)
+ $(common-objpfx)libc.so: $(common-objpfx)libc.map
+ endif
+ common-generated += libc.so libc_pic.os
++ifndef subdir
++install-extras := soinit.o sofini.o
++endif
+ ifdef libc.so-version
+ $(common-objpfx)libc.so$(libc.so-version): $(common-objpfx)libc.so
+ 	$(make-link)
+@@ -1004,6 +1007,7 @@ endif
+ 
+ install: check-install-supported
+ 
++installed-libcs := $(installed-libcs) $(inst_libdir)/libc_pic.a
+ install: $(installed-libcs)
+ $(installed-libcs): $(inst_libdir)/lib$(libprefix)%: lib $(+force)
+ 	$(make-target-directory)
+@@ -1032,6 +1036,22 @@ versioned := $(strip $(foreach so,$(install-lib.so),\
+ install-lib.so-versioned := $(filter $(versioned), $(install-lib.so))
+ install-lib.so-unversioned := $(filter-out $(versioned), $(install-lib.so))
+ 
++# Install the _pic.a files for versioned libraries, and corresponding
++# .map files.
++# libpthread_pic.a breaks mklibs, so don't install it and its map.
++install-lib := $(install-lib) $(install-lib.so-versioned:%.so=%_pic.a)
++install-lib := $(filter-out libpthread_pic.a,$(install-lib))
++# Despite having a soname libhurduser and libmachuser do not use symbol
++# versioning, so don't install the corresponding .map files.
++ifeq ($(build-shared),yes)
++install-map := $(patsubst %.so,%.map,\
++			$(foreach L,$(install-lib.so-versioned),$(notdir $L)))
++install-map := $(filter-out libhurduser.map libmachuser.map libpthread.map,$(install-map))
++ifndef subdir
++install-map := $(install-map) libc.map
++endif
++endif
++
+ # For versioned libraries, we install three files:
+ #	$(inst_libdir)/libfoo.so	-- for linking, symlink or ld script
+ #	$(inst_slibdir)/libfoo.so.NN	-- for loading by SONAME, symlink
+@@ -1275,9 +1295,22 @@ $(addprefix $(inst_includedir)/,$(headers-nonh)): $(inst_includedir)/%: \
+ endif	# headers-nonh
+ endif	# headers
+ 
++ifdef install-map
++$(addprefix $(inst_libdir)/,$(patsubst lib%.map,lib%_pic.map,$(install-map))): \
++  $(inst_libdir)/lib%_pic.map: $(common-objpfx)lib%.map $(+force)
++	$(do-install)
++endif
++
++ifdef install-extras
++$(addprefix $(inst_libdir)/libc_pic/,$(install-extras)): \
++  $(inst_libdir)/libc_pic/%.o: $(elf-objpfx)%.os $(+force)
++	$(do-install)
++endif
++
+ .PHONY: install-bin-nosubdir install-bin-script-nosubdir \
+ 	install-rootsbin-nosubdir install-sbin-nosubdir install-lib-nosubdir \
+-	install-data-nosubdir install-headers-nosubdir
++	install-data-nosubdir install-headers-nosubdir install-map-nosubdir \
++	install-extras-nosubdir
+ install-bin-nosubdir: $(addprefix $(inst_bindir)/,$(install-bin))
+ install-bin-script-nosubdir: $(addprefix $(inst_bindir)/,$(install-bin-script))
+ install-rootsbin-nosubdir: \
+@@ -1290,6 +1323,10 @@ install-data-nosubdir: $(addprefix $(inst_datadir)/,$(install-data))
+ install-headers-nosubdir: $(addprefix $(inst_includedir)/,$(headers))
+ install-others-nosubdir: $(install-others)
+ install-others-programs-nosubdir: $(install-others-programs)
++install-map-nosubdir: $(addprefix $(inst_libdir)/,\
++		       $(patsubst lib%.map,lib%_pic.map,$(install-map)))
++install-extras-nosubdir: $(addprefix $(inst_libdir)/libc_pic/,\
++		       $(install-extras))
+ 
+ # We need all the `-nosubdir' targets so that `install' in the parent
+ # doesn't depend on several things which each iterate over the subdirs.
+@@ -1299,7 +1336,8 @@ install-%:: install-%-nosubdir ;
+ 
+ .PHONY: install install-no-libc.a-nosubdir
+ install-no-libc.a-nosubdir: install-headers-nosubdir install-data-nosubdir \
+-			    install-lib-nosubdir install-others-nosubdir
++			    install-lib-nosubdir install-others-nosubdir \
++			    install-map-nosubdir install-extras-nosubdir
+ ifeq ($(build-programs),yes)
+ install-no-libc.a-nosubdir: install-bin-nosubdir install-bin-script-nosubdir \
+ 			    install-rootsbin-nosubdir install-sbin-nosubdir \
+diff --git a/configure b/configure
+index eecd0ace74..e20b554ace 100755
+--- a/configure
++++ b/configure
+@@ -4691,7 +4691,7 @@ else
+   # Found it, now check the version.
+   { $as_echo "$as_me:${as_lineno-$LINENO}: checking version of $LD" >&5
+ $as_echo_n "checking version of $LD... " >&6; }
+-  ac_prog_version=`$LD --version 2>&1 | sed -n 's/^.*GNU ld.* \([0-9][0-9]*\.[0-9.]*\).*$/\1/p'`
++  ac_prog_version=`$LD --version 2>&1 | sed -n 's/^.*GNU [Bbinutilsd][^.]* \([0-9][0-9]*\.[0-9.]*\).*$/\1/p'`
+   case $ac_prog_version in
+     '') ac_prog_version="v. ?.??, bad"; ac_verc_fail=yes;;
+     2.1[0-9][0-9]*|2.2[2-9]*|2.[3-9][0-9]*|[3-9].*|[1-9][0-9]*)
+diff --git a/configure.ac b/configure.ac
+index 4a77411b71..e0e9636587 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1066,7 +1066,7 @@ AC_CHECK_PROG_VER(AS, $AS, --version,
+ 		  [2.1[0-9][0-9]*|2.2[2-9]*|2.[3-9][0-9]*|[3-9].*|[1-9][0-9]*],
+ 		  AS=: critic_missing="$critic_missing as")
+ AC_CHECK_PROG_VER(LD, $LD, --version,
+-		  [GNU ld.* \([0-9][0-9]*\.[0-9.]*\)],
++		  [GNU [Bbinutilsd][^.]* \([0-9][0-9]*\.[0-9.]*\)],
+ 		  [2.1[0-9][0-9]*|2.2[2-9]*|2.[3-9][0-9]*|[3-9].*|[1-9][0-9]*],
+ 		  LD=: critic_missing="$critic_missing ld")
+ 
+diff --git a/elf/dl-deps.c b/elf/dl-deps.c
+index 1b8bac6593..c616808f31 100644
+--- a/elf/dl-deps.c
++++ b/elf/dl-deps.c
+@@ -73,13 +73,19 @@ _dl_build_local_scope (struct link_map **list, struct link_map *map)
+ {
+   struct link_map **p = list;
+   struct link_map **q;
++  struct link_map **r;
+ 
+   *p++ = map;
+   map->l_reserved = 1;
+-  if (map->l_initfini)
+-    for (q = map->l_initfini + 1; *q; ++q)
+-      if (! (*q)->l_reserved)
+-	p += _dl_build_local_scope (p, *q);
++
++  for (r = list; r < p; ++r)
++    if ((*r)->l_initfini)
++      for (q = (*r)->l_initfini + 1; *q; ++q)
++	if (! (*q)->l_reserved)
++	  {
++	    *p++ = *q;
++	    (*q)->l_reserved = 1;
++	  }
+   return p - list;
+ }
+ 
+diff --git a/elf/ldd.bash.in b/elf/ldd.bash.in
+index 7dd1fccf24..ddfae2b2a0 100644
+--- a/elf/ldd.bash.in
++++ b/elf/ldd.bash.in
+@@ -1,4 +1,4 @@
+-#! @BASH@
++#! /bin/sh
+ # Copyright (C) 1996-2017 Free Software Foundation, Inc.
+ # This file is part of the GNU C Library.
+ 
+diff --git a/elf/readlib.c b/elf/readlib.c
+index d278a189b2..44fef9f94a 100644
+--- a/elf/readlib.c
++++ b/elf/readlib.c
+@@ -51,6 +51,7 @@ static struct known_names interpreters[] =
+ #ifdef SYSDEP_KNOWN_INTERPRETER_NAMES
+   SYSDEP_KNOWN_INTERPRETER_NAMES
+ #endif
++  {"/lib/ld-linux.so.2",FLAG_ELF_LIBC6 }
+ };
+ 
+ static struct known_names known_libs[] =
+diff --git a/iconv/gconv_charset.h b/iconv/gconv_charset.h
+index 18d8bd6ae7..eb729da5d3 100644
+--- a/iconv/gconv_charset.h
++++ b/iconv/gconv_charset.h
+@@ -21,7 +21,7 @@
+ #include <locale.h>
+ 
+ 
+-static void
++static void __attribute__ ((unused))
+ strip (char *wp, const char *s)
+ {
+   int slash_count = 0;
+diff --git a/locale/Makefile b/locale/Makefile
+index 29a34b1f26..a6548ced1a 100644
+--- a/locale/Makefile
++++ b/locale/Makefile
+@@ -25,7 +25,8 @@ include ../Makeconfig
+ headers		= locale.h bits/locale.h langinfo.h xlocale.h
+ routines	= setlocale findlocale loadlocale loadarchive \
+ 		  localeconv nl_langinfo nl_langinfo_l mb_cur_max \
+-		  newlocale duplocale freelocale uselocale
++		  newlocale duplocale freelocale uselocale \
++		  catnames
+ tests		= tst-C-locale tst-locname tst-duplocale
+ categories	= ctype messages monetary numeric time paper name \
+ 		  address telephone measurement identification collate
+diff --git a/locale/gen-translit.pl b/locale/gen-translit.pl
+index 30d3f2f195..e97653017c 100644
+--- a/locale/gen-translit.pl
++++ b/locale/gen-translit.pl
+@@ -1,5 +1,5 @@
+ #!/usr/bin/perl -w
+-open F, "cat C-translit.h.in | gcc -E - |" || die "Cannot preprocess input file";
++open F, 'cat C-translit.h.in | ${CPP:-gcc -E} - |' || die "Cannot preprocess input file";
+ 
+ 
+ sub cstrlen {
+diff --git a/locale/localeinfo.h b/locale/localeinfo.h
+index f0694dc84e..b30b008a17 100644
+--- a/locale/localeinfo.h
++++ b/locale/localeinfo.h
+@@ -224,7 +224,7 @@ __libc_tsd_define (extern, __locale_t, LOCALE)
+    unused.  We can manage this playing some tricks with weak references.
+    But with thread-local locale settings, it becomes quite ungainly unless
+    we can use __thread variables.  So only in that case do we attempt this.  */
+-#ifndef SHARED
++#if !defined SHARED && !defined IN_GLIBC_LOCALEDEF
+ # include <tls.h>
+ # define NL_CURRENT_INDIRECT	1
+ #endif
+diff --git a/locale/programs/charmap-dir.c b/locale/programs/charmap-dir.c
+index e55ab86e28..0f87e6dd28 100644
+--- a/locale/programs/charmap-dir.c
++++ b/locale/programs/charmap-dir.c
+@@ -19,7 +19,9 @@
+ #include <error.h>
+ #include <fcntl.h>
+ #include <libintl.h>
++#ifndef NO_UNCOMPRESS
+ #include <spawn.h>
++#endif
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -156,6 +158,7 @@ charmap_closedir (CHARMAP_DIR *cdir)
+   return closedir (dir);
+ }
+ 
++#ifndef NO_UNCOMPRESS
+ /* Creates a subprocess decompressing the given pathname, and returns
+    a stream reading its output (the decompressed data).  */
+ static
+@@ -204,6 +207,7 @@ fopen_uncompressed (const char *pathname, const char *compressor)
+     }
+   return NULL;
+ }
++#endif
+ 
+ /* Opens a charmap for reading, given its name (not an alias name).  */
+ FILE *
+@@ -226,6 +230,7 @@ charmap_open (const char *directory, const char *name)
+   if (stream != NULL)
+     return stream;
+ 
++#ifndef NO_UNCOMPRESS
+   memcpy (p, ".gz", 4);
+   stream = fopen_uncompressed (pathname, "gzip");
+   if (stream != NULL)
+@@ -235,6 +240,7 @@ charmap_open (const char *directory, const char *name)
+   stream = fopen_uncompressed (pathname, "bzip2");
+   if (stream != NULL)
+     return stream;
++#endif
+ 
+   return NULL;
+ }
+diff --git a/locale/programs/config.h b/locale/programs/config.h
+index 5b416be0d8..79e66eed5e 100644
+--- a/locale/programs/config.h
++++ b/locale/programs/config.h
+@@ -19,6 +19,9 @@
+ #ifndef _LD_CONFIG_H
+ #define _LD_CONFIG_H	1
+ 
++#ifndef DUMMY_LOCALE_T
++#define DUMMY_LOCALE_T
++#endif
+ /* Use the internal textdomain used for libc messages.  */
+ #define PACKAGE _libc_intl_domainname
+ #ifndef VERSION
+diff --git a/locale/programs/ld-collate.c b/locale/programs/ld-collate.c
+index cec848cb7c..fcd768eb7d 100644
+--- a/locale/programs/ld-collate.c
++++ b/locale/programs/ld-collate.c
+@@ -350,7 +350,7 @@ new_element (struct locale_collate_t *collate, const char *mbs, size_t mbslen,
+     }
+   if (wcs != NULL)
+     {
+-      size_t nwcs = wcslen ((wchar_t *) wcs);
++      size_t nwcs = wcslen_uint32 (wcs);
+       uint32_t zero = 0;
+       /* Handle <U0000> as a single character.  */
+       if (nwcs == 0)
+@@ -1776,8 +1776,7 @@ symbol `%s' has the same encoding as"), (*eptr)->name);
+ 
+ 	      if ((*eptr)->nwcs == runp->nwcs)
+ 		{
+-		  int c = wmemcmp ((wchar_t *) (*eptr)->wcs,
+-				   (wchar_t *) runp->wcs, runp->nwcs);
++		  int c = wmemcmp_uint32 ((*eptr)->wcs, runp->wcs, runp->nwcs);
+ 
+ 		  if (c == 0)
+ 		    {
+@@ -2010,9 +2009,9 @@ add_to_tablewc (uint32_t ch, struct element_t *runp)
+ 	     one consecutive entry.  */
+ 	  if (runp->wcnext != NULL
+ 	      && runp->nwcs == runp->wcnext->nwcs
+-	      && wmemcmp ((wchar_t *) runp->wcs,
+-			  (wchar_t *)runp->wcnext->wcs,
+-			  runp->nwcs - 1) == 0
++	      && wmemcmp_uint32 (runp->wcs,
++				 runp->wcnext->wcs,
++				 runp->nwcs - 1) == 0
+ 	      && (runp->wcs[runp->nwcs - 1]
+ 		  == runp->wcnext->wcs[runp->nwcs - 1] + 1))
+ 	    {
+@@ -2036,9 +2035,9 @@ add_to_tablewc (uint32_t ch, struct element_t *runp)
+ 		runp = runp->wcnext;
+ 	      while (runp->wcnext != NULL
+ 		     && runp->nwcs == runp->wcnext->nwcs
+-		     && wmemcmp ((wchar_t *) runp->wcs,
+-				 (wchar_t *)runp->wcnext->wcs,
+-				 runp->nwcs - 1) == 0
++		     && wmemcmp_uint32 (runp->wcs,
++					runp->wcnext->wcs,
++					runp->nwcs - 1) == 0
+ 		     && (runp->wcs[runp->nwcs - 1]
+ 			 == runp->wcnext->wcs[runp->nwcs - 1] + 1));
+ 
+diff --git a/locale/programs/ld-ctype.c b/locale/programs/ld-ctype.c
+index df266c20d6..05c0152ec9 100644
+--- a/locale/programs/ld-ctype.c
++++ b/locale/programs/ld-ctype.c
+@@ -926,7 +926,7 @@ ctype_output (struct localedef_t *locale, const struct charmap_t *charmap,
+   allocate_arrays (ctype, charmap, ctype->repertoire);
+ 
+   default_missing_len = (ctype->default_missing
+-			 ? wcslen ((wchar_t *) ctype->default_missing)
++			 ? wcslen_uint32 (ctype->default_missing)
+ 			 : 0);
+ 
+   init_locale_data (&file, nelems);
+@@ -1937,7 +1937,7 @@ read_translit_entry (struct linereader *ldfile, struct locale_ctype_t *ctype,
+ 	    ignore = 1;
+ 	  else
+ 	    /* This value is usable.  */
+-	    obstack_grow (ob, to_wstr, wcslen ((wchar_t *) to_wstr) * 4);
++	    obstack_grow (ob, to_wstr, wcslen_uint32 (to_wstr) * 4);
+ 
+ 	  first = 0;
+ 	}
+@@ -2471,8 +2471,8 @@ with character code range values one must use the absolute ellipsis `...'"));
+ 	    }
+ 
+ 	handle_tok_digit:
+-	  class_bit = _ISwdigit;
+-	  class256_bit = _ISdigit;
++	  class_bit = BITw (tok_digit);
++	  class256_bit = BIT (tok_digit);
+ 	  handle_digits = 1;
+ 	  goto read_charclass;
+ 
+@@ -3929,8 +3929,7 @@ allocate_arrays (struct locale_ctype_t *ctype, const struct charmap_t *charmap,
+ 
+ 	  while (idx < number)
+ 	    {
+-	      int res = wcscmp ((const wchar_t *) sorted[idx]->from,
+-				(const wchar_t *) runp->from);
++	      int res = wcscmp_uint32 (sorted[idx]->from, runp->from);
+ 	      if (res == 0)
+ 		{
+ 		  replace = 1;
+@@ -3967,11 +3966,11 @@ allocate_arrays (struct locale_ctype_t *ctype, const struct charmap_t *charmap,
+       for (size_t cnt = 0; cnt < number; ++cnt)
+ 	{
+ 	  struct translit_to_t *srunp;
+-	  from_len += wcslen ((const wchar_t *) sorted[cnt]->from) + 1;
++	  from_len += wcslen_uint32 (sorted[cnt]->from) + 1;
+ 	  srunp = sorted[cnt]->to;
+ 	  while (srunp != NULL)
+ 	    {
+-	      to_len += wcslen ((const wchar_t *) srunp->str) + 1;
++	      to_len += wcslen_uint32 (srunp->str) + 1;
+ 	      srunp = srunp->next;
+ 	    }
+ 	  /* Plus one for the extra NUL character marking the end of
+@@ -3995,18 +3994,18 @@ allocate_arrays (struct locale_ctype_t *ctype, const struct charmap_t *charmap,
+ 	  ctype->translit_from_idx[cnt] = from_len;
+ 	  ctype->translit_to_idx[cnt] = to_len;
+ 
+-	  len = wcslen ((const wchar_t *) sorted[cnt]->from) + 1;
+-	  wmemcpy ((wchar_t *) &ctype->translit_from_tbl[from_len],
+-		   (const wchar_t *) sorted[cnt]->from, len);
++	  len = wcslen_uint32 (sorted[cnt]->from) + 1;
++	  wmemcpy_uint32 (&ctype->translit_from_tbl[from_len],
++			  sorted[cnt]->from, len);
+ 	  from_len += len;
+ 
+ 	  ctype->translit_to_idx[cnt] = to_len;
+ 	  srunp = sorted[cnt]->to;
+ 	  while (srunp != NULL)
+ 	    {
+-	      len = wcslen ((const wchar_t *) srunp->str) + 1;
+-	      wmemcpy ((wchar_t *) &ctype->translit_to_tbl[to_len],
+-		       (const wchar_t *) srunp->str, len);
++	      len = wcslen_uint32 (srunp->str) + 1;
++	      wmemcpy_uint32 (&ctype->translit_to_tbl[to_len],
++			      srunp->str, len);
+ 	      to_len += len;
+ 	      srunp = srunp->next;
+ 	    }
+diff --git a/locale/programs/ld-time.c b/locale/programs/ld-time.c
+index 32e9c41e35..6a61fcedeb 100644
+--- a/locale/programs/ld-time.c
++++ b/locale/programs/ld-time.c
+@@ -215,8 +215,10 @@ No definition for %s category found"), "LC_TIME"));
+ 	}
+       else
+ 	{
++	  static const uint32_t wt_fmt_ampm[]
++	    = { '%','I',':','%','M',':','%','S',' ','%','p',0 };
+ 	  time->t_fmt_ampm = "%I:%M:%S %p";
+-	  time->wt_fmt_ampm = (const uint32_t *) L"%I:%M:%S %p";
++	  time->wt_fmt_ampm = wt_fmt_ampm;
+ 	}
+     }
+ 
+@@ -226,7 +228,7 @@ No definition for %s category found"), "LC_TIME"));
+       const int days_per_month[12] = { 31, 29, 31, 30, 31, 30,
+ 				       31, 31, 30, 31 ,30, 31 };
+       size_t idx;
+-      wchar_t *wstr;
++      uint32_t *wstr;
+ 
+       time->era_entries =
+ 	(struct era_data *) xmalloc (time->num_era
+@@ -464,18 +466,18 @@ No definition for %s category found"), "LC_TIME"));
+ 	    }
+ 
+ 	  /* Now generate the wide character name and format.  */
+-	  wstr = wcschr ((wchar_t *) time->wera[idx], L':');/* end direction */
+-	  wstr = wstr ? wcschr (wstr + 1, L':') : NULL;	/* end offset */
+-	  wstr = wstr ? wcschr (wstr + 1, L':') : NULL;	/* end start */
+-	  wstr = wstr ? wcschr (wstr + 1, L':') : NULL;	/* end end */
++	  wstr = wcschr_uint32 (time->wera[idx], L':'); /* end direction */
++	  wstr = wstr ? wcschr_uint32 (wstr + 1, L':') : NULL; /* end offset */
++	  wstr = wstr ? wcschr_uint32 (wstr + 1, L':') : NULL; /* end start */
++	  wstr = wstr ? wcschr_uint32 (wstr + 1, L':') : NULL; /* end end */
+ 	  if (wstr != NULL)
+ 	    {
+-	      time->era_entries[idx].wname = (uint32_t *) wstr + 1;
+-	      wstr = wcschr (wstr + 1, L':');	/* end name */
++	      time->era_entries[idx].wname = wstr + 1;
++	      wstr = wcschr_uint32 (wstr + 1, L':'); /* end name */
+ 	      if (wstr != NULL)
+ 		{
+ 		  *wstr = L'\0';
+-		  time->era_entries[idx].wformat = (uint32_t *) wstr + 1;
++		  time->era_entries[idx].wformat = wstr + 1;
+ 		}
+ 	      else
+ 		time->era_entries[idx].wname =
+@@ -534,7 +536,16 @@ No definition for %s category found"), "LC_TIME"));
+   if (time->date_fmt == NULL)
+     time->date_fmt = "%a %b %e %H:%M:%S %Z %Y";
+   if (time->wdate_fmt == NULL)
+-    time->wdate_fmt = (const uint32_t *) L"%a %b %e %H:%M:%S %Z %Y";
++    {
++      static const uint32_t wdate_fmt[] =
++	{ '%','a',' ',
++	  '%','b',' ',
++	  '%','e',' ',
++	  '%','H',':','%','M',':','%','S',' ',
++	  '%','Z',' ',
++	  '%','Y',0 };
++      time->wdate_fmt = wdate_fmt;
++    }
+ }
+ 
+ 
+diff --git a/locale/programs/linereader.c b/locale/programs/linereader.c
+index 52b340963a..1a8bce17b4 100644
+--- a/locale/programs/linereader.c
++++ b/locale/programs/linereader.c
+@@ -595,7 +595,7 @@ get_string (struct linereader *lr, const struct charmap_t *charmap,
+ {
+   int return_widestr = lr->return_widestr;
+   char *buf;
+-  wchar_t *buf2 = NULL;
++  uint32_t *buf2 = NULL;
+   size_t bufact;
+   size_t bufmax = 56;
+ 
+diff --git a/locale/programs/localedef.c b/locale/programs/localedef.c
+index 6acc1342c7..df87740f8b 100644
+--- a/locale/programs/localedef.c
++++ b/locale/programs/localedef.c
+@@ -108,6 +108,7 @@ void (*argp_program_version_hook) (FILE *, struct argp_state *) = print_version;
+ #define OPT_LIST_ARCHIVE 309
+ #define OPT_LITTLE_ENDIAN 400
+ #define OPT_BIG_ENDIAN 401
++#define OPT_UINT32_ALIGN 402
+ 
+ /* Definitions of arguments for argp functions.  */
+ static const struct argp_option options[] =
+@@ -143,6 +144,8 @@ static const struct argp_option options[] =
+     N_("Generate little-endian output") },
+   { "big-endian", OPT_BIG_ENDIAN, NULL, 0,
+     N_("Generate big-endian output") },
++  { "uint32-align", OPT_UINT32_ALIGN, "ALIGNMENT", 0,
++    N_("Set the target's uint32_t alignment in bytes (default 4)") },
+   { NULL, 0, NULL, 0, NULL }
+ };
+ 
+@@ -232,12 +235,14 @@ main (int argc, char *argv[])
+      ctype locale.  (P1003.2 4.35.5.2)  */
+   setlocale (LC_CTYPE, "POSIX");
+ 
++#ifndef NO_SYSCONF
+   /* Look whether the system really allows locale definitions.  POSIX
+      defines error code 3 for this situation so I think it must be
+      a fatal error (see P1003.2 4.35.8).  */
+   if (sysconf (_SC_2_LOCALEDEF) < 0)
+     WITH_CUR_LOCALE (error (3, 0, _("\
+ FATAL: system does not define `_POSIX2_LOCALEDEF'")));
++#endif
+ 
+   /* Process charmap file.  */
+   charmap = charmap_read (charmap_file, verbose, 1, be_quiet, 1);
+@@ -328,6 +333,9 @@ parse_opt (int key, char *arg, struct argp_state *state)
+     case OPT_BIG_ENDIAN:
+       set_big_endian (true);
+       break;
++    case OPT_UINT32_ALIGN:
++      uint32_align_mask = strtol (arg, NULL, 0) - 1;
++      break;
+     case 'c':
+       force_output = 1;
+       break;
+diff --git a/locale/programs/locfile.c b/locale/programs/locfile.c
+index 0990ef11be..683422c908 100644
+--- a/locale/programs/locfile.c
++++ b/locale/programs/locfile.c
+@@ -544,6 +544,9 @@ compare_files (const char *filename1, const char *filename2, size_t size,
+    machine running localedef.  */
+ bool swap_endianness_p;
+ 
++/* The target's value of __align__(uint32_t) - 1.  */
++unsigned int uint32_align_mask = 3;
++
+ /* When called outside a start_locale_structure/end_locale_structure
+    or start_locale_prelude/end_locale_prelude block, record that the
+    next byte in FILE's obstack will be the first byte of a new element.
+@@ -621,7 +624,7 @@ add_locale_string (struct locale_file *file, const char *string)
+ void
+ add_locale_wstring (struct locale_file *file, const uint32_t *string)
+ {
+-  add_locale_uint32_array (file, string, wcslen ((const wchar_t *) string) + 1);
++  add_locale_uint32_array (file, string, wcslen_uint32 (string) + 1);
+ }
+ 
+ /* Record that FILE's next element is the 32-bit integer VALUE.  */
+diff --git a/locale/programs/locfile.h b/locale/programs/locfile.h
+index 3407e13c13..0bb556caf8 100644
+--- a/locale/programs/locfile.h
++++ b/locale/programs/locfile.h
+@@ -71,6 +71,8 @@ extern void write_all_categories (struct localedef_t *definitions,
+ 
+ extern bool swap_endianness_p;
+ 
++extern unsigned int uint32_align_mask;
++
+ /* Change the output to be big-endian if BIG_ENDIAN is true and
+    little-endian otherwise.  */
+ static inline void
+@@ -89,7 +91,8 @@ maybe_swap_uint32 (uint32_t value)
+ }
+ 
+ /* Likewise, but munge an array of N uint32_ts starting at ARRAY.  */
+-static inline void
++static void
++__attribute__ ((unused))
+ maybe_swap_uint32_array (uint32_t *array, size_t n)
+ {
+   if (swap_endianness_p)
+@@ -99,7 +102,8 @@ maybe_swap_uint32_array (uint32_t *array, size_t n)
+ 
+ /* Like maybe_swap_uint32_array, but the array of N elements is at
+    the end of OBSTACK's current object.  */
+-static inline void
++static void
++__attribute__ ((unused))
+ maybe_swap_uint32_obstack (struct obstack *obstack, size_t n)
+ {
+   maybe_swap_uint32_array ((uint32_t *) obstack_next_free (obstack) - n, n);
+@@ -276,4 +280,55 @@ extern void identification_output (struct localedef_t *locale,
+ 				   const struct charmap_t *charmap,
+ 				   const char *output_path);
+ 
++static size_t wcslen_uint32 (const uint32_t *str) __attribute__ ((unused));
++static uint32_t * wmemcpy_uint32 (uint32_t *s1, const uint32_t *s2, size_t n) __attribute__ ((unused));
++static uint32_t * wcschr_uint32 (const uint32_t *s, uint32_t ch) __attribute__ ((unused));
++static int wcscmp_uint32 (const uint32_t *s1, const uint32_t *s2) __attribute__ ((unused));
++static int wmemcmp_uint32 (const uint32_t *s1, const uint32_t *s2, size_t n) __attribute__ ((unused));
++
++static size_t
++wcslen_uint32 (const uint32_t *str)
++{
++  size_t len = 0;
++  while (str[len] != 0)
++    len++;
++  return len;
++}
++
++static  int
++wmemcmp_uint32 (const uint32_t *s1, const uint32_t *s2, size_t n)
++{
++  while (n-- != 0)
++    {
++      int diff = *s1++ - *s2++;
++      if (diff != 0)
++	return diff;
++    }
++  return 0;
++}
++
++static int
++wcscmp_uint32 (const uint32_t *s1, const uint32_t *s2)
++{
++  while (*s1 != 0 && *s1 == *s2)
++    s1++, s2++;
++  return *s1 - *s2;
++}
++
++static uint32_t *
++wmemcpy_uint32 (uint32_t *s1, const uint32_t *s2, size_t n)
++{
++  return memcpy (s1, s2, n * sizeof (uint32_t));
++}
++
++static uint32_t *
++wcschr_uint32 (const uint32_t *s, uint32_t ch)
++{
++  do
++    if (*s == ch)
++      return (uint32_t *) s;
++  while (*s++ != 0);
++  return 0;
++}
++
+ #endif /* locfile.h */
+diff --git a/locale/setlocale.c b/locale/setlocale.c
+index 1603ef306a..aaf3bba1a6 100644
+--- a/locale/setlocale.c
++++ b/locale/setlocale.c
+@@ -64,36 +64,6 @@ static char *const _nl_current_used[] =
+ #endif
+ 
+ 
+-/* Define an array of category names (also the environment variable names).  */
+-const union catnamestr_t _nl_category_names attribute_hidden =
+-  {
+-    {
+-#define DEFINE_CATEGORY(category, category_name, items, a) \
+-      category_name,
+-#include "categories.def"
+-#undef DEFINE_CATEGORY
+-    }
+-  };
+-
+-const uint8_t _nl_category_name_idxs[__LC_LAST] attribute_hidden =
+-  {
+-#define DEFINE_CATEGORY(category, category_name, items, a) \
+-    [category] = offsetof (union catnamestr_t, CATNAMEMF (__LINE__)),
+-#include "categories.def"
+-#undef DEFINE_CATEGORY
+-  };
+-
+-/* An array of their lengths, for convenience.  */
+-const uint8_t _nl_category_name_sizes[] attribute_hidden =
+-  {
+-#define DEFINE_CATEGORY(category, category_name, items, a) \
+-    [category] = sizeof (category_name) - 1,
+-#include "categories.def"
+-#undef	DEFINE_CATEGORY
+-    [LC_ALL] = sizeof ("LC_ALL") - 1
+-  };
+-
+-
+ #ifdef NL_CURRENT_INDIRECT
+ # define WEAK_POSTLOAD(postload) weak_extern (postload)
+ #else
+diff --git a/manual/Makefile b/manual/Makefile
+index 510f160d3b..c6f8c4d9a8 100644
+--- a/manual/Makefile
++++ b/manual/Makefile
+@@ -106,7 +106,8 @@ $(objpfx)libm-err.texi: $(objpfx)stamp-libm-err
+ $(objpfx)stamp-libm-err: libm-err-tab.pl $(wildcard $(foreach dir,$(sysdirs),\
+ 						     $(dir)/libm-test-ulps))
+ 	pwd=`pwd`; \
+-	$(PERL) $< $$pwd/.. > $(objpfx)libm-err-tmp
++	$(PERL) $< $$pwd/../ports > $(objpfx)libm-err-tmp
++	$(PERL) $< $$pwd/../sysdeps >> $(objpfx)libm-err-tmp
+ 	$(move-if-change) $(objpfx)libm-err-tmp $(objpfx)libm-err.texi
+ 	touch $@
+ 
+diff --git a/nscd/nscd.init b/nscd/nscd.init
+index a882da7d8b..b02986ec15 100644
+--- a/nscd/nscd.init
++++ b/nscd/nscd.init
+@@ -1,4 +1,4 @@
+-#!/bin/bash
++#!/bin/sh
+ #
+ # nscd:		Starts the Name Switch Cache Daemon
+ #
+@@ -49,7 +49,7 @@ prog=nscd
+ start () {
+     [ -d /var/run/nscd ] || mkdir /var/run/nscd
+     [ -d /var/db/nscd ] || mkdir /var/db/nscd
+-    echo -n $"Starting $prog: "
++    echo -n "Starting $prog: "
+     daemon /usr/sbin/nscd
+     RETVAL=$?
+     echo
+@@ -58,7 +58,7 @@ start () {
+ }
+ 
+ stop () {
+-    echo -n $"Stopping $prog: "
++    echo -n "Stopping $prog: "
+     /usr/sbin/nscd -K
+     RETVAL=$?
+     if [ $RETVAL -eq 0 ]; then
+@@ -67,9 +67,9 @@ stop () {
+ 	# a non-privileged user
+ 	rm -f /var/run/nscd/nscd.pid
+ 	rm -f /var/run/nscd/socket
+-       	success $"$prog shutdown"
++	success "$prog shutdown"
+     else
+-       	failure $"$prog shutdown"
++	failure "$prog shutdown"
+     fi
+     echo
+     return $RETVAL
+@@ -103,13 +103,13 @@ case "$1" in
+ 	RETVAL=$?
+ 	;;
+     force-reload | reload)
+-    	echo -n $"Reloading $prog: "
++	echo -n "Reloading $prog: "
+ 	killproc /usr/sbin/nscd -HUP
+ 	RETVAL=$?
+ 	echo
+ 	;;
+     *)
+-	echo $"Usage: $0 {start|stop|status|restart|reload|condrestart}"
++	echo "Usage: $0 {start|stop|status|restart|reload|condrestart}"
+ 	RETVAL=1
+ 	;;
+ esac
+diff --git a/resolv/res_libc.c b/resolv/res_libc.c
+index a4b376f15b..3256e12c56 100644
+--- a/resolv/res_libc.c
++++ b/resolv/res_libc.c
+@@ -21,11 +21,13 @@
+ #include <atomic.h>
+ #include <limits.h>
+ #include <sys/types.h>
++#include <sys/stat.h>
+ #include <netinet/in.h>
+ #include <arpa/nameser.h>
+ #include <resolv.h>
+ #include <libc-lock.h>
+ 
++__libc_lock_define_initialized (static, lock);
+ extern unsigned long long int __res_initstamp attribute_hidden;
+ /* We have atomic increment operations on 64-bit platforms.  */
+ #if __WORDSIZE == 64
+@@ -33,7 +35,6 @@ extern unsigned long long int __res_initstamp attribute_hidden;
+ # define atomicincunlock(lock) (void) 0
+ # define atomicinc(var) catomic_increment (&(var))
+ #else
+-__libc_lock_define_initialized (static, lock);
+ # define atomicinclock(lock) __libc_lock_lock (lock)
+ # define atomicincunlock(lock) __libc_lock_unlock (lock)
+ # define atomicinc(var) ++var
+@@ -92,7 +93,18 @@ res_init(void) {
+ int
+ __res_maybe_init (res_state resp, int preinit)
+ {
++	static time_t last_mtime;
++	struct stat statbuf;
++	int ret;
++
+ 	if (resp->options & RES_INIT) {
++		ret = stat (_PATH_RESCONF, &statbuf);
++		__libc_lock_lock (lock);
++		if ((ret == 0) && (last_mtime != statbuf.st_mtime)) {
++			last_mtime = statbuf.st_mtime;
++			atomicinc (__res_initstamp);
++		}
++		__libc_lock_unlock (lock);
+ 		if (__res_initstamp != resp->_u._ext.initstamp) {
+ 			if (resp->nscount > 0)
+ 				__res_iclose (resp, true);
+diff --git a/scripts/config.guess b/scripts/config.guess
+index bbd48b60e8..fddac4281a 100755
+--- a/scripts/config.guess
++++ b/scripts/config.guess
+@@ -1,8 +1,8 @@
+ #! /bin/sh
+ # Attempt to guess a canonical system name.
+-#   Copyright 1992-2017 Free Software Foundation, Inc.
++#   Copyright 1992-2015 Free Software Foundation, Inc.
+ 
+-timestamp='2017-01-01'
++timestamp='2015-07-03'
+ 
+ # This file is free software; you can redistribute it and/or modify it
+ # under the terms of the GNU General Public License as published by
+@@ -27,7 +27,7 @@ timestamp='2017-01-01'
+ # Originally written by Per Bothner; maintained since 2000 by Ben Elliston.
+ #
+ # You can get the latest version of this script from:
+-# http://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.guess
++# http://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.guess;hb=HEAD
+ #
+ # Please send patches to <config-patches@gnu.org>.
+ 
+@@ -50,7 +50,7 @@ version="\
+ GNU config.guess ($timestamp)
+ 
+ Originally written by Per Bothner.
+-Copyright 1992-2017 Free Software Foundation, Inc.
++Copyright 1992-2015 Free Software Foundation, Inc.
+ 
+ This is free software; see the source for copying conditions.  There is NO
+ warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
+@@ -186,12 +186,9 @@ case "${UNAME_MACHINE}:${UNAME_SYSTEM}:${UNAME_RELEASE}:${UNAME_VERSION}" in
+ 	    *) machine=${UNAME_MACHINE_ARCH}-unknown ;;
+ 	esac
+ 	# The Operating System including object format, if it has switched
+-	# to ELF recently (or will in the future) and ABI.
++	# to ELF recently, or will in the future.
+ 	case "${UNAME_MACHINE_ARCH}" in
+-	    earm*)
+-		os=netbsdelf
+-		;;
+-	    arm*|i386|m68k|ns32k|sh3*|sparc|vax)
++	    arm*|earm*|i386|m68k|ns32k|sh3*|sparc|vax)
+ 		eval $set_cc_for_build
+ 		if echo __ELF__ | $CC_FOR_BUILD -E - 2>/dev/null \
+ 			| grep -q __ELF__
+@@ -240,10 +237,6 @@ case "${UNAME_MACHINE}:${UNAME_SYSTEM}:${UNAME_RELEASE}:${UNAME_VERSION}" in
+ 	UNAME_MACHINE_ARCH=`arch | sed 's/OpenBSD.//'`
+ 	echo ${UNAME_MACHINE_ARCH}-unknown-openbsd${UNAME_RELEASE}
+ 	exit ;;
+-    *:LibertyBSD:*:*)
+-	UNAME_MACHINE_ARCH=`arch | sed 's/^.*BSD\.//'`
+-	echo ${UNAME_MACHINE_ARCH}-unknown-libertybsd${UNAME_RELEASE}
+-	exit ;;
+     *:ekkoBSD:*:*)
+ 	echo ${UNAME_MACHINE}-unknown-ekkobsd${UNAME_RELEASE}
+ 	exit ;;
+@@ -256,9 +249,6 @@ case "${UNAME_MACHINE}:${UNAME_SYSTEM}:${UNAME_RELEASE}:${UNAME_VERSION}" in
+     *:MirBSD:*:*)
+ 	echo ${UNAME_MACHINE}-unknown-mirbsd${UNAME_RELEASE}
+ 	exit ;;
+-    *:Sortix:*:*)
+-	echo ${UNAME_MACHINE}-unknown-sortix
+-	exit ;;
+     alpha:OSF1:*:*)
+ 	case $UNAME_RELEASE in
+ 	*4.0)
+@@ -275,42 +265,42 @@ case "${UNAME_MACHINE}:${UNAME_SYSTEM}:${UNAME_RELEASE}:${UNAME_VERSION}" in
+ 	ALPHA_CPU_TYPE=`/usr/sbin/psrinfo -v | sed -n -e 's/^  The alpha \(.*\) processor.*$/\1/p' | head -n 1`
+ 	case "$ALPHA_CPU_TYPE" in
+ 	    "EV4 (21064)")
+-		UNAME_MACHINE=alpha ;;
++		UNAME_MACHINE="alpha" ;;
+ 	    "EV4.5 (21064)")
+-		UNAME_MACHINE=alpha ;;
++		UNAME_MACHINE="alpha" ;;
+ 	    "LCA4 (21066/21068)")
+-		UNAME_MACHINE=alpha ;;
++		UNAME_MACHINE="alpha" ;;
+ 	    "EV5 (21164)")
+-		UNAME_MACHINE=alphaev5 ;;
++		UNAME_MACHINE="alphaev5" ;;
+ 	    "EV5.6 (21164A)")
+-		UNAME_MACHINE=alphaev56 ;;
++		UNAME_MACHINE="alphaev56" ;;
+ 	    "EV5.6 (21164PC)")
+-		UNAME_MACHINE=alphapca56 ;;
++		UNAME_MACHINE="alphapca56" ;;
+ 	    "EV5.7 (21164PC)")
+-		UNAME_MACHINE=alphapca57 ;;
++		UNAME_MACHINE="alphapca57" ;;
+ 	    "EV6 (21264)")
+-		UNAME_MACHINE=alphaev6 ;;
++		UNAME_MACHINE="alphaev6" ;;
+ 	    "EV6.7 (21264A)")
+-		UNAME_MACHINE=alphaev67 ;;
++		UNAME_MACHINE="alphaev67" ;;
+ 	    "EV6.8CB (21264C)")
+-		UNAME_MACHINE=alphaev68 ;;
++		UNAME_MACHINE="alphaev68" ;;
+ 	    "EV6.8AL (21264B)")
+-		UNAME_MACHINE=alphaev68 ;;
++		UNAME_MACHINE="alphaev68" ;;
+ 	    "EV6.8CX (21264D)")
+-		UNAME_MACHINE=alphaev68 ;;
++		UNAME_MACHINE="alphaev68" ;;
+ 	    "EV6.9A (21264/EV69A)")
+-		UNAME_MACHINE=alphaev69 ;;
++		UNAME_MACHINE="alphaev69" ;;
+ 	    "EV7 (21364)")
+-		UNAME_MACHINE=alphaev7 ;;
++		UNAME_MACHINE="alphaev7" ;;
+ 	    "EV7.9 (21364A)")
+-		UNAME_MACHINE=alphaev79 ;;
++		UNAME_MACHINE="alphaev79" ;;
+ 	esac
+ 	# A Pn.n version is a patched version.
+ 	# A Vn.n version is a released version.
+ 	# A Tn.n version is a released field test version.
+ 	# A Xn.n version is an unreleased experimental baselevel.
+ 	# 1.2 uses "1.2" for uname -r.
+-	echo ${UNAME_MACHINE}-dec-osf`echo ${UNAME_RELEASE} | sed -e 's/^[PVTX]//' | tr ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz`
++	echo ${UNAME_MACHINE}-dec-osf`echo ${UNAME_RELEASE} | sed -e 's/^[PVTX]//' | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'`
+ 	# Reset EXIT trap before exiting to avoid spurious non-zero exit code.
+ 	exitcode=$?
+ 	trap '' 0
+@@ -383,16 +373,16 @@ case "${UNAME_MACHINE}:${UNAME_SYSTEM}:${UNAME_RELEASE}:${UNAME_VERSION}" in
+ 	exit ;;
+     i86pc:SunOS:5.*:* | i86xen:SunOS:5.*:*)
+ 	eval $set_cc_for_build
+-	SUN_ARCH=i386
++	SUN_ARCH="i386"
+ 	# If there is a compiler, see if it is configured for 64-bit objects.
+ 	# Note that the Sun cc does not turn __LP64__ into 1 like gcc does.
+ 	# This test works for both compilers.
+-	if [ "$CC_FOR_BUILD" != no_compiler_found ]; then
++	if [ "$CC_FOR_BUILD" != 'no_compiler_found' ]; then
+ 	    if (echo '#ifdef __amd64'; echo IS_64BIT_ARCH; echo '#endif') | \
+-		(CCOPTS="" $CC_FOR_BUILD -E - 2>/dev/null) | \
++		(CCOPTS= $CC_FOR_BUILD -E - 2>/dev/null) | \
+ 		grep IS_64BIT_ARCH >/dev/null
+ 	    then
+-		SUN_ARCH=x86_64
++		SUN_ARCH="x86_64"
+ 	    fi
+ 	fi
+ 	echo ${SUN_ARCH}-pc-solaris2`echo ${UNAME_RELEASE}|sed -e 's/[^.]*//'`
+@@ -417,7 +407,7 @@ case "${UNAME_MACHINE}:${UNAME_SYSTEM}:${UNAME_RELEASE}:${UNAME_VERSION}" in
+ 	exit ;;
+     sun*:*:4.2BSD:*)
+ 	UNAME_RELEASE=`(sed 1q /etc/motd | awk '{print substr($5,1,3)}') 2>/dev/null`
+-	test "x${UNAME_RELEASE}" = x && UNAME_RELEASE=3
++	test "x${UNAME_RELEASE}" = "x" && UNAME_RELEASE=3
+ 	case "`/bin/arch`" in
+ 	    sun3)
+ 		echo m68k-sun-sunos${UNAME_RELEASE}
+@@ -642,13 +632,13 @@ EOF
+ 		    sc_cpu_version=`/usr/bin/getconf SC_CPU_VERSION 2>/dev/null`
+ 		    sc_kernel_bits=`/usr/bin/getconf SC_KERNEL_BITS 2>/dev/null`
+ 		    case "${sc_cpu_version}" in
+-		      523) HP_ARCH=hppa1.0 ;; # CPU_PA_RISC1_0
+-		      528) HP_ARCH=hppa1.1 ;; # CPU_PA_RISC1_1
++		      523) HP_ARCH="hppa1.0" ;; # CPU_PA_RISC1_0
++		      528) HP_ARCH="hppa1.1" ;; # CPU_PA_RISC1_1
+ 		      532)                      # CPU_PA_RISC2_0
+ 			case "${sc_kernel_bits}" in
+-			  32) HP_ARCH=hppa2.0n ;;
+-			  64) HP_ARCH=hppa2.0w ;;
+-			  '') HP_ARCH=hppa2.0 ;;   # HP-UX 10.20
++			  32) HP_ARCH="hppa2.0n" ;;
++			  64) HP_ARCH="hppa2.0w" ;;
++			  '') HP_ARCH="hppa2.0" ;;   # HP-UX 10.20
+ 			esac ;;
+ 		    esac
+ 		fi
+@@ -687,11 +677,11 @@ EOF
+ 		    exit (0);
+ 		}
+ EOF
+-		    (CCOPTS="" $CC_FOR_BUILD -o $dummy $dummy.c 2>/dev/null) && HP_ARCH=`$dummy`
++		    (CCOPTS= $CC_FOR_BUILD -o $dummy $dummy.c 2>/dev/null) && HP_ARCH=`$dummy`
+ 		    test -z "$HP_ARCH" && HP_ARCH=hppa
+ 		fi ;;
+ 	esac
+-	if [ ${HP_ARCH} = hppa2.0w ]
++	if [ ${HP_ARCH} = "hppa2.0w" ]
+ 	then
+ 	    eval $set_cc_for_build
+ 
+@@ -704,12 +694,12 @@ EOF
+ 	    # $ CC_FOR_BUILD="cc +DA2.0w" ./config.guess
+ 	    # => hppa64-hp-hpux11.23
+ 
+-	    if echo __LP64__ | (CCOPTS="" $CC_FOR_BUILD -E - 2>/dev/null) |
++	    if echo __LP64__ | (CCOPTS= $CC_FOR_BUILD -E - 2>/dev/null) |
+ 		grep -q __LP64__
+ 	    then
+-		HP_ARCH=hppa2.0w
++		HP_ARCH="hppa2.0w"
+ 	    else
+-		HP_ARCH=hppa64
++		HP_ARCH="hppa64"
+ 	    fi
+ 	fi
+ 	echo ${HP_ARCH}-hp-hpux${HPUX_REV}
+@@ -814,14 +804,14 @@ EOF
+ 	echo craynv-cray-unicosmp${UNAME_RELEASE} | sed -e 's/\.[^.]*$/.X/'
+ 	exit ;;
+     F30[01]:UNIX_System_V:*:* | F700:UNIX_System_V:*:*)
+-	FUJITSU_PROC=`uname -m | tr ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz`
+-	FUJITSU_SYS=`uname -p | tr ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz | sed -e 's/\///'`
++	FUJITSU_PROC=`uname -m | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'`
++	FUJITSU_SYS=`uname -p | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz' | sed -e 's/\///'`
+ 	FUJITSU_REL=`echo ${UNAME_RELEASE} | sed -e 's/ /_/'`
+ 	echo "${FUJITSU_PROC}-fujitsu-${FUJITSU_SYS}${FUJITSU_REL}"
+ 	exit ;;
+     5000:UNIX_System_V:4.*:*)
+-	FUJITSU_SYS=`uname -p | tr ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz | sed -e 's/\///'`
+-	FUJITSU_REL=`echo ${UNAME_RELEASE} | tr ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz | sed -e 's/ /_/'`
++	FUJITSU_SYS=`uname -p | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz' | sed -e 's/\///'`
++	FUJITSU_REL=`echo ${UNAME_RELEASE} | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz' | sed -e 's/ /_/'`
+ 	echo "sparc-fujitsu-${FUJITSU_SYS}${FUJITSU_REL}"
+ 	exit ;;
+     i*86:BSD/386:*:* | i*86:BSD/OS:*:* | *:Ascend\ Embedded/OS:*:*)
+@@ -903,7 +893,7 @@ EOF
+ 	exit ;;
+     *:GNU/*:*:*)
+ 	# other systems with GNU libc and userland
+-	echo ${UNAME_MACHINE}-unknown-`echo ${UNAME_SYSTEM} | sed 's,^[^/]*/,,' | tr "[:upper:]" "[:lower:]"``echo ${UNAME_RELEASE}|sed -e 's/[-(].*//'`-${LIBC}
++	echo ${UNAME_MACHINE}-unknown-`echo ${UNAME_SYSTEM} | sed 's,^[^/]*/,,' | tr '[A-Z]' '[a-z]'``echo ${UNAME_RELEASE}|sed -e 's/[-(].*//'`-${LIBC}
+ 	exit ;;
+     i*86:Minix:*:*)
+ 	echo ${UNAME_MACHINE}-pc-minix
+@@ -926,7 +916,7 @@ EOF
+ 	  EV68*) UNAME_MACHINE=alphaev68 ;;
+ 	esac
+ 	objdump --private-headers /bin/sh | grep -q ld.so.1
+-	if test "$?" = 0 ; then LIBC=gnulibc1 ; fi
++	if test "$?" = 0 ; then LIBC="gnulibc1" ; fi
+ 	echo ${UNAME_MACHINE}-unknown-linux-${LIBC}
+ 	exit ;;
+     arc:Linux:*:* | arceb:Linux:*:*)
+@@ -972,9 +962,6 @@ EOF
+     ia64:Linux:*:*)
+ 	echo ${UNAME_MACHINE}-unknown-linux-${LIBC}
+ 	exit ;;
+-    k1om:Linux:*:*)
+-	echo ${UNAME_MACHINE}-unknown-linux-${LIBC}
+-	exit ;;
+     m32r*:Linux:*:*)
+ 	echo ${UNAME_MACHINE}-unknown-linux-${LIBC}
+ 	exit ;;
+@@ -1000,9 +987,6 @@ EOF
+ 	eval `$CC_FOR_BUILD -E $dummy.c 2>/dev/null | grep '^CPU'`
+ 	test x"${CPU}" != x && { echo "${CPU}-unknown-linux-${LIBC}"; exit; }
+ 	;;
+-    mips64el:Linux:*:*)
+-	echo ${UNAME_MACHINE}-unknown-linux-${LIBC}
+-	exit ;;
+     openrisc*:Linux:*:*)
+ 	echo or1k-unknown-linux-${LIBC}
+ 	exit ;;
+@@ -1035,9 +1019,6 @@ EOF
+     ppcle:Linux:*:*)
+ 	echo powerpcle-unknown-linux-${LIBC}
+ 	exit ;;
+-    riscv32:Linux:*:* | riscv64:Linux:*:*)
+-	echo ${UNAME_MACHINE}-unknown-linux-${LIBC}
+-	exit ;;
+     s390:Linux:*:* | s390x:Linux:*:*)
+ 	echo ${UNAME_MACHINE}-ibm-linux-${LIBC}
+ 	exit ;;
+@@ -1136,7 +1117,7 @@ EOF
+ 	# uname -m prints for DJGPP always 'pc', but it prints nothing about
+ 	# the processor, so we play safe by assuming i586.
+ 	# Note: whatever this is, it MUST be the same as what config.sub
+-	# prints for the "djgpp" host, or else GDB configure will decide that
++	# prints for the "djgpp" host, or else GDB configury will decide that
+ 	# this is a cross-build.
+ 	echo i586-pc-msdosdjgpp
+ 	exit ;;
+@@ -1285,9 +1266,6 @@ EOF
+     SX-8R:SUPER-UX:*:*)
+ 	echo sx8r-nec-superux${UNAME_RELEASE}
+ 	exit ;;
+-    SX-ACE:SUPER-UX:*:*)
+-	echo sxace-nec-superux${UNAME_RELEASE}
+-	exit ;;
+     Power*:Rhapsody:*:*)
+ 	echo powerpc-apple-rhapsody${UNAME_RELEASE}
+ 	exit ;;
+@@ -1301,9 +1279,9 @@ EOF
+ 	    UNAME_PROCESSOR=powerpc
+ 	fi
+ 	if test `echo "$UNAME_RELEASE" | sed -e 's/\..*//'` -le 10 ; then
+-	    if [ "$CC_FOR_BUILD" != no_compiler_found ]; then
++	    if [ "$CC_FOR_BUILD" != 'no_compiler_found' ]; then
+ 		if (echo '#ifdef __LP64__'; echo IS_64BIT_ARCH; echo '#endif') | \
+-		    (CCOPTS="" $CC_FOR_BUILD -E - 2>/dev/null) | \
++		    (CCOPTS= $CC_FOR_BUILD -E - 2>/dev/null) | \
+ 		    grep IS_64BIT_ARCH >/dev/null
+ 		then
+ 		    case $UNAME_PROCESSOR in
+@@ -1325,7 +1303,7 @@ EOF
+ 	exit ;;
+     *:procnto*:*:* | *:QNX:[0123456789]*:*)
+ 	UNAME_PROCESSOR=`uname -p`
+-	if test "$UNAME_PROCESSOR" = x86; then
++	if test "$UNAME_PROCESSOR" = "x86"; then
+ 		UNAME_PROCESSOR=i386
+ 		UNAME_MACHINE=pc
+ 	fi
+@@ -1356,7 +1334,7 @@ EOF
+ 	# "uname -m" is not consistent, so use $cputype instead. 386
+ 	# is converted to i386 for consistency with other x86
+ 	# operating systems.
+-	if test "$cputype" = 386; then
++	if test "$cputype" = "386"; then
+ 	    UNAME_MACHINE=i386
+ 	else
+ 	    UNAME_MACHINE="$cputype"
+@@ -1398,7 +1376,7 @@ EOF
+ 	echo i386-pc-xenix
+ 	exit ;;
+     i*86:skyos:*:*)
+-	echo ${UNAME_MACHINE}-pc-skyos`echo ${UNAME_RELEASE} | sed -e 's/ .*$//'`
++	echo ${UNAME_MACHINE}-pc-skyos`echo ${UNAME_RELEASE}` | sed -e 's/ .*$//'
+ 	exit ;;
+     i*86:rdos:*:*)
+ 	echo ${UNAME_MACHINE}-pc-rdos
+@@ -1409,25 +1387,23 @@ EOF
+     x86_64:VMkernel:*:*)
+ 	echo ${UNAME_MACHINE}-unknown-esx
+ 	exit ;;
+-    amd64:Isilon\ OneFS:*:*)
+-	echo x86_64-unknown-onefs
+-	exit ;;
+ esac
+ 
+ cat >&2 <<EOF
+ $0: unable to guess system type
+ 
+-This script (version $timestamp), has failed to recognize the
+-operating system you are using. If your script is old, overwrite
+-config.guess and config.sub with the latest versions from:
++This script, last modified $timestamp, has failed to recognize
++the operating system you are using. It is advised that you
++download the most up to date version of the config scripts from
+ 
+-  http://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.guess
++  http://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.guess;hb=HEAD
+ and
+-  http://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.sub
++  http://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.sub;hb=HEAD
+ 
+-If $0 has already been updated, send the following data and any
+-information you think might be pertinent to config-patches@gnu.org to
+-provide the necessary information to handle your system.
++If the version you run ($0) is already up to date, please
++send the following data and any information you think might be
++pertinent to <config-patches@gnu.org> in order to provide the needed
++information to handle your system.
+ 
+ config.guess timestamp = $timestamp
+ 
+diff --git a/scripts/config.sub b/scripts/config.sub
+index 7e792b4ae1..f018151c64 100755
+--- a/scripts/config.sub
++++ b/scripts/config.sub
+@@ -1,8 +1,8 @@
+ #! /bin/sh
+ # Configuration validation subroutine script.
+-#   Copyright 1992-2017 Free Software Foundation, Inc.
++#   Copyright 1992-2015 Free Software Foundation, Inc.
+ 
+-timestamp='2017-01-01'
++timestamp='2015-07-28'
+ 
+ # This file is free software; you can redistribute it and/or modify it
+ # under the terms of the GNU General Public License as published by
+@@ -33,7 +33,7 @@ timestamp='2017-01-01'
+ # Otherwise, we print the canonical config type on stdout and succeed.
+ 
+ # You can get the latest version of this script from:
+-# http://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.sub
++# http://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.sub;hb=HEAD
+ 
+ # This file is supposed to be the same for all GNU packages
+ # and recognize all the CPU types, system types and aliases
+@@ -53,7 +53,8 @@ timestamp='2017-01-01'
+ me=`echo "$0" | sed -e 's,.*/,,'`
+ 
+ usage="\
+-Usage: $0 [OPTION] CPU-MFR-OPSYS or ALIAS
++Usage: $0 [OPTION] CPU-MFR-OPSYS
++       $0 [OPTION] ALIAS
+ 
+ Canonicalize a configuration name.
+ 
+@@ -67,7 +68,7 @@ Report bugs and patches to <config-patches@gnu.org>."
+ version="\
+ GNU config.sub ($timestamp)
+ 
+-Copyright 1992-2017 Free Software Foundation, Inc.
++Copyright 1992-2015 Free Software Foundation, Inc.
+ 
+ This is free software; see the source for copying conditions.  There is NO
+ warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
+@@ -117,7 +118,7 @@ case $maybe_os in
+   nto-qnx* | linux-gnu* | linux-android* | linux-dietlibc | linux-newlib* | \
+   linux-musl* | linux-uclibc* | uclinux-uclibc* | uclinux-gnu* | kfreebsd*-gnu* | \
+   knetbsd*-gnu* | netbsd*-gnu* | netbsd*-eabi* | \
+-  kopensolaris*-gnu* | cloudabi*-eabi* | \
++  kopensolaris*-gnu* | \
+   storm-chaos* | os2-emx* | rtmk-nova*)
+     os=-$maybe_os
+     basic_machine=`echo $1 | sed 's/^\(.*\)-\([^-]*-[^-]*\)$/\1/'`
+@@ -301,12 +302,11 @@ case $basic_machine in
+ 	| open8 | or1k | or1knd | or32 \
+ 	| pdp10 | pdp11 | pj | pjl \
+ 	| powerpc | powerpc64 | powerpc64le | powerpcle \
+-	| pru \
+ 	| pyramid \
+ 	| riscv32 | riscv64 \
+ 	| rl78 | rx \
+ 	| score \
+-	| sh | sh[1234] | sh[24]a | sh[24]aeb | sh[23]e | sh[234]eb | sheb | shbe | shle | sh[1234]le | sh3ele \
++	| sh | sh[1234] | sh[24]a | sh[24]aeb | sh[23]e | sh[34]eb | sheb | shbe | shle | sh[1234]le | sh3ele \
+ 	| sh64 | sh64le \
+ 	| sparc | sparc64 | sparc64b | sparc64v | sparc86x | sparclet | sparclite \
+ 	| sparcv8 | sparcv9 | sparcv9b | sparcv9v \
+@@ -429,7 +429,6 @@ case $basic_machine in
+ 	| orion-* \
+ 	| pdp10-* | pdp11-* | pj-* | pjl-* | pn-* | power-* \
+ 	| powerpc-* | powerpc64-* | powerpc64le-* | powerpcle-* \
+-	| pru-* \
+ 	| pyramid-* \
+ 	| riscv32-* | riscv64-* \
+ 	| rl78-* | romp-* | rs6000-* | rx-* \
+@@ -522,7 +521,7 @@ case $basic_machine in
+ 		basic_machine=i386-pc
+ 		os=-aros
+ 		;;
+-	asmjs)
++        asmjs)
+ 		basic_machine=asmjs-unknown
+ 		;;
+ 	aux)
+@@ -645,14 +644,6 @@ case $basic_machine in
+ 		basic_machine=m68k-bull
+ 		os=-sysv3
+ 		;;
+-	e500v[12])
+-		basic_machine=powerpc-unknown
+-		os=$os"spe"
+-		;;
+-	e500v[12]-*)
+-		basic_machine=powerpc-`echo $basic_machine | sed 's/^[^-]*-//'`
+-		os=$os"spe"
+-		;;
+ 	ebmon29k)
+ 		basic_machine=a29k-amd
+ 		os=-ebmon
+@@ -1032,7 +1023,7 @@ case $basic_machine in
+ 	ppc-* | ppcbe-*)
+ 		basic_machine=powerpc-`echo $basic_machine | sed 's/^[^-]*-//'`
+ 		;;
+-	ppcle | powerpclittle)
++	ppcle | powerpclittle | ppc-le | powerpc-little)
+ 		basic_machine=powerpcle-unknown
+ 		;;
+ 	ppcle-* | powerpclittle-*)
+@@ -1042,7 +1033,7 @@ case $basic_machine in
+ 		;;
+ 	ppc64-*) basic_machine=powerpc64-`echo $basic_machine | sed 's/^[^-]*-//'`
+ 		;;
+-	ppc64le | powerpc64little)
++	ppc64le | powerpc64little | ppc64-le | powerpc64-little)
+ 		basic_machine=powerpc64le-unknown
+ 		;;
+ 	ppc64le-* | powerpc64little-*)
+@@ -1388,18 +1379,18 @@ case $os in
+ 	      | -hpux* | -unos* | -osf* | -luna* | -dgux* | -auroraux* | -solaris* \
+ 	      | -sym* | -kopensolaris* | -plan9* \
+ 	      | -amigaos* | -amigados* | -msdos* | -newsos* | -unicos* | -aof* \
+-	      | -aos* | -aros* | -cloudabi* | -sortix* \
++	      | -aos* | -aros* | -cloudabi* \
+ 	      | -nindy* | -vxsim* | -vxworks* | -ebmon* | -hms* | -mvs* \
+ 	      | -clix* | -riscos* | -uniplus* | -iris* | -rtu* | -xenix* \
+ 	      | -hiux* | -386bsd* | -knetbsd* | -mirbsd* | -netbsd* \
+-	      | -bitrig* | -openbsd* | -solidbsd* | -libertybsd* \
++	      | -bitrig* | -openbsd* | -solidbsd* \
+ 	      | -ekkobsd* | -kfreebsd* | -freebsd* | -riscix* | -lynxos* \
+ 	      | -bosx* | -nextstep* | -cxux* | -aout* | -elf* | -oabi* \
+ 	      | -ptx* | -coff* | -ecoff* | -winnt* | -domain* | -vsta* \
+ 	      | -udi* | -eabi* | -lites* | -ieee* | -go32* | -aux* \
+-	      | -chorusos* | -chorusrdb* | -cegcc* | -glidix* \
++	      | -chorusos* | -chorusrdb* | -cegcc* \
+ 	      | -cygwin* | -msys* | -pe* | -psos* | -moss* | -proelf* | -rtems* \
+-	      | -midipix* | -mingw32* | -mingw64* | -linux-gnu* | -linux-android* \
++	      | -mingw32* | -mingw64* | -linux-gnu* | -linux-android* \
+ 	      | -linux-newlib* | -linux-musl* | -linux-uclibc* \
+ 	      | -uxpv* | -beos* | -mpeix* | -udk* | -moxiebox* \
+ 	      | -interix* | -uwin* | -mks* | -rhapsody* | -darwin* | -opened* \
+@@ -1408,8 +1399,7 @@ case $os in
+ 	      | -os2* | -vos* | -palmos* | -uclinux* | -nucleus* \
+ 	      | -morphos* | -superux* | -rtmk* | -rtmk-nova* | -windiss* \
+ 	      | -powermax* | -dnix* | -nx6 | -nx7 | -sei* | -dragonfly* \
+-	      | -skyos* | -haiku* | -rdos* | -toppers* | -drops* | -es* \
+-	      | -onefs* | -tirtos* | -phoenix* | -fuchsia* | -redox*)
++	      | -skyos* | -haiku* | -rdos* | -toppers* | -drops* | -es* | -tirtos*)
+ 	# Remember, each alternative MUST END IN *, to match a version number.
+ 		;;
+ 	-qnx*)
+@@ -1541,8 +1531,6 @@ case $os in
+ 		;;
+ 	-nacl*)
+ 		;;
+-	-ios)
+-		;;
+ 	-none)
+ 		;;
+ 	*)
+@@ -1638,9 +1626,6 @@ case $basic_machine in
+ 	sparc-* | *-sun)
+ 		os=-sunos4.1.1
+ 		;;
+-	pru-*)
+-		os=-elf
+-		;;
+ 	*-be)
+ 		os=-beos
+ 		;;
+diff --git a/sysdeps/aarch64/configure b/sysdeps/aarch64/configure
+index 5bd355a691..3bc5537bc0 100644
+--- a/sysdeps/aarch64/configure
++++ b/sysdeps/aarch64/configure
+@@ -148,12 +148,12 @@ else
+   cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+ /* end confdefs.h.  */
+ #ifdef __AARCH64EB__
+-                      yes
++                      is_aarch64_be
+                      #endif
+ 
+ _ACEOF
+ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+-  $EGREP "yes" >/dev/null 2>&1; then :
++  $EGREP "is_aarch64_be" >/dev/null 2>&1; then :
+   libc_cv_aarch64_be=yes
+ else
+   libc_cv_aarch64_be=no
+diff --git a/sysdeps/aarch64/configure.ac b/sysdeps/aarch64/configure.ac
+index 7851dd4dac..6e9238171f 100644
+--- a/sysdeps/aarch64/configure.ac
++++ b/sysdeps/aarch64/configure.ac
+@@ -10,8 +10,8 @@ GLIBC_PROVIDES dnl See aclocal.m4 in the top level source directory.
+ # the dynamic linker via %ifdef.
+ AC_CACHE_CHECK([for big endian],
+   [libc_cv_aarch64_be],
+-  [AC_EGREP_CPP(yes,[#ifdef __AARCH64EB__
+-                      yes
++  [AC_EGREP_CPP(is_aarch64_be,[#ifdef __AARCH64EB__
++                      is_aarch64_be
+                      #endif
+   ], libc_cv_aarch64_be=yes, libc_cv_aarch64_be=no)])
+ if test $libc_cv_aarch64_be = yes; then
+diff --git a/sysdeps/arm/configure b/sysdeps/arm/configure
+index 431e843b2b..e152461138 100644
+--- a/sysdeps/arm/configure
++++ b/sysdeps/arm/configure
+@@ -151,12 +151,12 @@ else
+   cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+ /* end confdefs.h.  */
+ #ifdef __ARM_PCS_VFP
+-		      yes
++		      use_arm_pcs_vfp
+ 		     #endif
+ 
+ _ACEOF
+ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+-  $EGREP "yes" >/dev/null 2>&1; then :
++  $EGREP "use_arm_pcs_vfp" >/dev/null 2>&1; then :
+   libc_cv_arm_pcs_vfp=yes
+ else
+   libc_cv_arm_pcs_vfp=no
+diff --git a/sysdeps/arm/configure.ac b/sysdeps/arm/configure.ac
+index 90cdd69c75..05a262ba00 100644
+--- a/sysdeps/arm/configure.ac
++++ b/sysdeps/arm/configure.ac
+@@ -15,8 +15,8 @@ AC_DEFINE(PI_STATIC_AND_HIDDEN)
+ # the dynamic linker via %ifdef.
+ AC_CACHE_CHECK([whether the compiler is using the ARM hard-float ABI],
+   [libc_cv_arm_pcs_vfp],
+-  [AC_EGREP_CPP(yes,[#ifdef __ARM_PCS_VFP
+-		      yes
++  [AC_EGREP_CPP(use_arm_pcs_vfp,[#ifdef __ARM_PCS_VFP
++		      use_arm_pcs_vfp
+ 		     #endif
+   ], libc_cv_arm_pcs_vfp=yes, libc_cv_arm_pcs_vfp=no)])
+ if test $libc_cv_arm_pcs_vfp = yes; then
+diff --git a/sysdeps/arm/dl-machine.h b/sysdeps/arm/dl-machine.h
+index 2c72972bd2..193ca877b7 100644
+--- a/sysdeps/arm/dl-machine.h
++++ b/sysdeps/arm/dl-machine.h
+@@ -499,7 +499,7 @@ elf_machine_rel (struct link_map *map, const Elf32_Rel *reloc,
+ 
+ 	case R_ARM_TLS_DTPOFF32:
+ 	  if (sym != NULL)
+-	    *reloc_addr += sym->st_value;
++	    *reloc_addr = sym->st_value;
+ 	  break;
+ 
+ 	case R_ARM_TLS_TPOFF32:
+diff --git a/sysdeps/gnu/configure b/sysdeps/gnu/configure
+index 71243ad0c6..f578187576 100644
+--- a/sysdeps/gnu/configure
++++ b/sysdeps/gnu/configure
+@@ -32,6 +32,6 @@ case "$prefix" in
+   else
+     libc_cv_localstatedir=$localstatedir
+    fi
+-  libc_cv_rootsbindir=/sbin
++  test -n "$libc_cv_rootsbindir" || libc_cv_rootsbindir=/sbin
+   ;;
+ esac
+diff --git a/sysdeps/gnu/configure.ac b/sysdeps/gnu/configure.ac
+index 634fe4de2a..3db1697f4f 100644
+--- a/sysdeps/gnu/configure.ac
++++ b/sysdeps/gnu/configure.ac
+@@ -21,6 +21,6 @@ case "$prefix" in
+   else
+     libc_cv_localstatedir=$localstatedir
+    fi
+-  libc_cv_rootsbindir=/sbin
++  test -n "$libc_cv_rootsbindir" || libc_cv_rootsbindir=/sbin
+   ;;
+ esac
+diff --git a/sysdeps/mips/configure b/sysdeps/mips/configure
+index 4e13248c03..f14af952d0 100644
+--- a/sysdeps/mips/configure
++++ b/sysdeps/mips/configure
+@@ -143,11 +143,11 @@ else
+ /* end confdefs.h.  */
+ dnl
+ #ifdef __mips_nan2008
+-yes
++use_mips_nan2008
+ #endif
+ _ACEOF
+ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+-  $EGREP "yes" >/dev/null 2>&1; then :
++  $EGREP "use_mips_nan2008" >/dev/null 2>&1; then :
+   libc_cv_mips_nan2008=yes
+ else
+   libc_cv_mips_nan2008=no
+diff --git a/sysdeps/mips/configure.ac b/sysdeps/mips/configure.ac
+index bcbdaffd9f..ad3057f4cc 100644
+--- a/sysdeps/mips/configure.ac
++++ b/sysdeps/mips/configure.ac
+@@ -6,9 +6,9 @@ dnl position independent way.
+ dnl AC_DEFINE(PI_STATIC_AND_HIDDEN)
+ 
+ AC_CACHE_CHECK([whether the compiler is using the 2008 NaN encoding],
+-  libc_cv_mips_nan2008, [AC_EGREP_CPP(yes, [dnl
++  libc_cv_mips_nan2008, [AC_EGREP_CPP(use_mips_nan2008, [dnl
+ #ifdef __mips_nan2008
+-yes
++use_mips_nan2008
+ #endif], libc_cv_mips_nan2008=yes, libc_cv_mips_nan2008=no)])
+ if test x$libc_cv_mips_nan2008 = xyes; then
+   AC_DEFINE(HAVE_MIPS_NAN2008)
+diff --git a/sysdeps/nios2/configure b/sysdeps/nios2/configure
+index 14c8a3a014..dde3814ef2 100644
+--- a/sysdeps/nios2/configure
++++ b/sysdeps/nios2/configure
+@@ -142,12 +142,12 @@ else
+   cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+ /* end confdefs.h.  */
+ #ifdef __nios2_big_endian__
+-                      yes
++                      is_nios2_be
+                      #endif
+ 
+ _ACEOF
+ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+-  $EGREP "yes" >/dev/null 2>&1; then :
++  $EGREP "is_nios2_be" >/dev/null 2>&1; then :
+   libc_cv_nios2_be=yes
+ else
+   libc_cv_nios2_be=no
+diff --git a/sysdeps/nios2/configure.ac b/sysdeps/nios2/configure.ac
+index f05f43802b..dc8639902d 100644
+--- a/sysdeps/nios2/configure.ac
++++ b/sysdeps/nios2/configure.ac
+@@ -4,8 +4,8 @@ GLIBC_PROVIDES dnl See aclocal.m4 in the top level source directory.
+ # Nios II big endian is not yet supported.
+ AC_CACHE_CHECK([for big endian],
+   [libc_cv_nios2_be],
+-  [AC_EGREP_CPP(yes,[#ifdef __nios2_big_endian__
+-                      yes
++  [AC_EGREP_CPP(is_nios2_be,[#ifdef __nios2_big_endian__
++                      is_nios2_be
+                      #endif
+   ], libc_cv_nios2_be=yes, libc_cv_nios2_be=no)])
+ if test $libc_cv_nios2_be = yes; then
+diff --git a/sysdeps/unix/sysv/linux/mips/configure b/sysdeps/unix/sysv/linux/mips/configure
+index a5513fad48..283b293ff3 100644
+--- a/sysdeps/unix/sysv/linux/mips/configure
++++ b/sysdeps/unix/sysv/linux/mips/configure
+@@ -414,11 +414,11 @@ else
+ /* end confdefs.h.  */
+ dnl
+ #ifdef __mips_nan2008
+-yes
++use_mips_nan2008
+ #endif
+ _ACEOF
+ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+-  $EGREP "yes" >/dev/null 2>&1; then :
++  $EGREP "use_mips_nan2008" >/dev/null 2>&1; then :
+   libc_cv_mips_nan2008=yes
+ else
+   libc_cv_mips_nan2008=no
+diff --git a/sysdeps/unix/sysv/linux/mips/configure.ac b/sysdeps/unix/sysv/linux/mips/configure.ac
+index 9147aa4582..7898e24738 100644
+--- a/sysdeps/unix/sysv/linux/mips/configure.ac
++++ b/sysdeps/unix/sysv/linux/mips/configure.ac
+@@ -105,9 +105,9 @@ AC_COMPILE_IFELSE(
+ LIBC_CONFIG_VAR([mips-mode-switch],[${libc_mips_mode_switch}])
+ 
+ AC_CACHE_CHECK([whether the compiler is using the 2008 NaN encoding],
+-  libc_cv_mips_nan2008, [AC_EGREP_CPP(yes, [dnl
++  libc_cv_mips_nan2008, [AC_EGREP_CPP(use_mips_nan2008, [dnl
+ #ifdef __mips_nan2008
+-yes
++use_mips_nan2008
+ #endif], libc_cv_mips_nan2008=yes, libc_cv_mips_nan2008=no)])
+ 
+ libc_mips_nan=
+diff --git a/sysdeps/unix/sysv/linux/powerpc/dl-sysdep.c b/sysdeps/unix/sysv/linux/powerpc/dl-sysdep.c
+index 23f5d5d388..7e45288db7 100644
+--- a/sysdeps/unix/sysv/linux/powerpc/dl-sysdep.c
++++ b/sysdeps/unix/sysv/linux/powerpc/dl-sysdep.c
+@@ -24,9 +24,21 @@ int __cache_line_size attribute_hidden;
+ /* Scan the Aux Vector for the "Data Cache Block Size" entry.  If found
+    verify that the static extern __cache_line_size is defined by checking
+    for not NULL.  If it is defined then assign the cache block size
+-   value to __cache_line_size.  */
++   value to __cache_line_size.  This is used by memset to
++   optimize setting to zero.  We have to detect 8xx processors, which
++   have buggy dcbz implementations that cannot report page faults
++   correctly.  That requires reading SPR, which is a privileged
++   operation.  Fortunately 2.2.18 and later emulates PowerPC mfspr
++   reads from the PVR register.   */
+ #define DL_PLATFORM_AUXV						      \
+       case AT_DCACHEBSIZE:						      \
++	if (__LINUX_KERNEL_VERSION >= 0x020218)				      \
++	  {								      \
++	    unsigned pvr = 0;						      \
++	    asm ("mfspr %0, 287" : "=r" (pvr));				      \
++	    if ((pvr & 0xffff0000) == 0x00500000)			      \
++	      break;							      \
++	  }								      \
+ 	__cache_line_size = av->a_un.a_val;				      \
+ 	break;
+ 
+diff --git a/sysdeps/unix/sysv/linux/powerpc/libc-start.c b/sysdeps/unix/sysv/linux/powerpc/libc-start.c
+index ad036c1e4b..afee56a3da 100644
+--- a/sysdeps/unix/sysv/linux/powerpc/libc-start.c
++++ b/sysdeps/unix/sysv/linux/powerpc/libc-start.c
+@@ -73,11 +73,25 @@ __libc_start_main (int argc, char **argv,
+ 
+   /* Initialize the __cache_line_size variable from the aux vector.  For the
+      static case, we also need _dl_hwcap, _dl_hwcap2 and _dl_platform, so we
+-     can call __tcb_parse_hwcap_and_convert_at_platform ().  */
++     can call __tcb_parse_hwcap_and_convert_at_platform ().
++
++     This is used by memset to optimize setting to zero.  We have to
++     detect 8xx processors, which have buggy dcbz implementations that
++     cannot report page faults correctly.  That requires reading SPR,
++     which is a privileged operation.  Fortunately 2.2.18 and later
++     emulates PowerPC mfspr reads from the PVR register.  */
+   for (ElfW (auxv_t) * av = auxvec; av->a_type != AT_NULL; ++av)
+     switch (av->a_type)
+       {
+       case AT_DCACHEBSIZE:
++	if (__LINUX_KERNEL_VERSION >= 0x020218)
++	  {
++	    unsigned pvr = 0;
++
++	    asm ("mfspr %0, 287" : "=r" (pvr) :);
++	    if ((pvr & 0xffff0000) == 0x00500000)
++	      break;
++	  }
+ 	__cache_line_size = av->a_un.a_val;
+ 	break;
+ #ifndef SHARED
+diff --git a/sysdeps/unix/sysv/linux/powerpc/powerpc64/configure b/sysdeps/unix/sysv/linux/powerpc/powerpc64/configure
+index af069700e9..27b8c1bb23 100644
+--- a/sysdeps/unix/sysv/linux/powerpc/powerpc64/configure
++++ b/sysdeps/unix/sysv/linux/powerpc/powerpc64/configure
+@@ -155,12 +155,12 @@ else
+   cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+ /* end confdefs.h.  */
+ #if _CALL_ELF == 2
+-                      yes
++                      use_ppc_elfv2_abi
+                      #endif
+ 
+ _ACEOF
+ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+-  $EGREP "yes" >/dev/null 2>&1; then :
++  $EGREP "use_ppc_elfv2_abi" >/dev/null 2>&1; then :
+   libc_cv_ppc64_elfv2_abi=yes
+ else
+   libc_cv_ppc64_elfv2_abi=no
+@@ -188,12 +188,12 @@ else
+   cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+ /* end confdefs.h.  */
+ #ifdef _CALL_ELF
+-                         yes
++                         is_def_call_elf
+                        #endif
+ 
+ _ACEOF
+ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+-  $EGREP "yes" >/dev/null 2>&1; then :
++  $EGREP "is_def_call_elf" >/dev/null 2>&1; then :
+   libc_cv_ppc64_def_call_elf=yes
+ else
+   libc_cv_ppc64_def_call_elf=no
+diff --git a/sysdeps/unix/sysv/linux/powerpc/powerpc64/configure.ac b/sysdeps/unix/sysv/linux/powerpc/powerpc64/configure.ac
+index 0822915c43..9a32fdd69d 100644
+--- a/sysdeps/unix/sysv/linux/powerpc/powerpc64/configure.ac
++++ b/sysdeps/unix/sysv/linux/powerpc/powerpc64/configure.ac
+@@ -6,8 +6,8 @@ LIBC_SLIBDIR_RTLDDIR([lib64], [lib64])
+ # Define default-abi according to compiler flags.
+ AC_CACHE_CHECK([whether the compiler is using the PowerPC64 ELFv2 ABI],
+   [libc_cv_ppc64_elfv2_abi],
+-  [AC_EGREP_CPP(yes,[#if _CALL_ELF == 2
+-                      yes
++  [AC_EGREP_CPP(use_ppc_elfv2_abi,[#if _CALL_ELF == 2
++                      use_ppc_elfv2_abi
+                      #endif
+   ], libc_cv_ppc64_elfv2_abi=yes, libc_cv_ppc64_elfv2_abi=no)])
+ if test $libc_cv_ppc64_elfv2_abi = yes; then
+@@ -19,8 +19,8 @@ else
+   # Compiler that do not support ELFv2 ABI does not define _CALL_ELF
+   AC_CACHE_CHECK([whether the compiler defines _CALL_ELF],
+     [libc_cv_ppc64_def_call_elf],
+-    [AC_EGREP_CPP(yes,[#ifdef _CALL_ELF
+-                         yes
++    [AC_EGREP_CPP(is_def_call_elf,[#ifdef _CALL_ELF
++                         is_def_call_elf
+                        #endif
+     ], libc_cv_ppc64_def_call_elf=yes, libc_cv_ppc64_def_call_elf=no)])
+   if test $libc_cv_ppc64_def_call_elf = no; then
+diff --git a/sysdeps/unix/sysv/linux/sh/Versions b/sysdeps/unix/sysv/linux/sh/Versions
+index e0938c4165..ca1d7da339 100644
+--- a/sysdeps/unix/sysv/linux/sh/Versions
++++ b/sysdeps/unix/sysv/linux/sh/Versions
+@@ -2,6 +2,7 @@ libc {
+   GLIBC_2.2 {
+     # functions used in other libraries
+     __xstat64; __fxstat64; __lxstat64;
++    __fpscr_values;
+ 
+     # a*
+     alphasort64;
+diff --git a/sysdeps/unix/sysv/linux/sh/sysdep.S b/sysdeps/unix/sysv/linux/sh/sysdep.S
+index 5f11bc737b..2fd217b00b 100644
+--- a/sysdeps/unix/sysv/linux/sh/sysdep.S
++++ b/sysdeps/unix/sysv/linux/sh/sysdep.S
+@@ -30,3 +30,14 @@ ENTRY (__syscall_error)
+ 
+ #define __syscall_error __syscall_error_1
+ #include <sysdeps/unix/sh/sysdep.S>
++
++       .data
++       .align 3
++       .globl ___fpscr_values
++       .type ___fpscr_values, @object
++       .size ___fpscr_values, 8
++___fpscr_values:
++       .long 0
++       .long 0x80000
++weak_alias (___fpscr_values, __fpscr_values)
++
+diff --git a/time/localtime.c b/time/localtime.c
+index bd006afff2..aa94e7b48b 100644
+--- a/time/localtime.c
++++ b/time/localtime.c
+@@ -31,6 +31,7 @@ __localtime_r (const time_t *t, struct tm *tp)
+ }
+ weak_alias (__localtime_r, localtime_r)
+ 
++#define _GNU_SOURCE
+ #include <sys/types.h>
+ #include <unistd.h>
+ #include <sys/syscall.h>
+diff --git a/timezone/Makefile b/timezone/Makefile
+index ab9d55b6be..b6ee36425d 100644
+--- a/timezone/Makefile
++++ b/timezone/Makefile
+@@ -120,7 +120,7 @@ $(testdata)/XT%: testdata/XT%
+ 	cp $< $@
+ 
+ $(objpfx)tzselect: tzselect.ksh $(common-objpfx)config.make
+-	sed -e 's|/bin/bash|$(BASH)|' \
++	sed -e 's|/bin/bash|/bin/sh|' \
+ 	    -e 's|TZDIR=[^}]*|TZDIR=$(zonedir)|' \
+ 	    -e '/TZVERSION=/s|see_Makefile|"$(version)"|' \
+ 	    -e '/PKGVERSION=/s|=.*|="$(PKGVERSION)"|' \
+diff --git a/timezone/tzselect.ksh b/timezone/tzselect.ksh
+index 2c3b2f4438..0c04a61e31 100755
+--- a/timezone/tzselect.ksh
++++ b/timezone/tzselect.ksh
+@@ -35,7 +35,7 @@ REPORT_BUGS_TO=tz@iana.org
+ 
+ # Specify default values for environment variables if they are unset.
+ : ${AWK=awk}
+-: ${TZDIR=`pwd`}
++: ${TZDIR=$(pwd)}
+ 
+ # Output one argument as-is to standard output.
+ # Safer than 'echo', which can mishandle '\' or leading '-'.
+-- 
+2.12.0
+
