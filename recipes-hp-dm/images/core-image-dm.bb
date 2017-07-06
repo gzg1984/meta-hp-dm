@@ -7,7 +7,7 @@ LICENSE = "GPLv2"
 
 inherit core-image
 
-IMAGE_INSTALL += "bbexample"
+IMAGE_INSTALL += "postmark"
 
 TOOLCHAIN_HOST_TASK_append = " nativesdk-intltool nativesdk-glib-2.0"
 TOOLCHAIN_HOST_TASK_remove_task-populate-sdk-ext = " nativesdk-intltool nativesdk-glib-2.0"
