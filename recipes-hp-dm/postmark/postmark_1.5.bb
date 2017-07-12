@@ -32,6 +32,7 @@ SET
 !
 	chmod a+x ${D}/usr/local/bin/postmark.sh
 }
+
 do_package_qa() {
 }
 

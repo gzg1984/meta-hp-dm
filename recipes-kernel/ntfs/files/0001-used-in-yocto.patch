@@ -1,0 +1,44 @@
+From 8d71222b294374202b1a0f2727c74a5e21e6389f Mon Sep 17 00:00:00 2001
+From: Gao Zhi Gang <zggao@suse.com>
+Date: Wed, 12 Jul 2017 11:09:18 -0400
+Subject: [PATCH] used in yocto
+
+---
+ Makefile | 13 ++++++-------
+ 1 file changed, 6 insertions(+), 7 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 3edb4e2..dcec3d8 100644
+--- a/Makefile
++++ b/Makefile
+@@ -13,21 +13,20 @@ ccflags-$(CONFIG_NTFS_DEBUG)	+= -DDEBUG
+ ccflags-$(CONFIG_NTFS_RW)	+= -DNTFS_RW
+ else
+ 
+-KERNEL ?= /lib/modules/`uname -r`/build
++KERNEL_SRC ?= /lib/modules/`uname -r`/build
+ 
+ default:
+-	CONFIG_NTFS_FS=m CONFIG_NTFS_RW=y CONFIG_NTFS_DEBUG=y $(MAKE) -C $(KERNEL) M=$$PWD
++	CONFIG_NTFS_FS=m CONFIG_NTFS_RW=y CONFIG_NTFS_DEBUG=y $(MAKE) -C $(KERNEL_SRC) M=$$PWD
+ 
+ 
+ .PHONY : install help clean
+ help:
+-	$(MAKE) -C $(KERNEL) M=$$PWD help
++	$(MAKE) -C $(KERNEL_SRC) M=$$PWD help
+ 
+-install : default
+-	$(MAKE) -C $(KERNEL) M=$$PWD modules_install
+-	depmod -A
++modules_install : default
++	$(MAKE) -C $(KERNEL_SRC) M=$$PWD modules_install
+ 
+ clean:
+-	make -C $(KERNEL) M=`pwd` clean
++	make -C $(KERNEL_SRC) M=`pwd` clean
+ 
+ endif
+-- 
+2.12.0
+

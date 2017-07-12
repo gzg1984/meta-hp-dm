@@ -49,7 +49,13 @@ Buy a VPS.
 
 	postmark.sh
 
-
+---
+	Known Steps
+---
+	TEMPLATECONF=`pwd`/meta-hp-dm/conf source oe-init-build-env
+---
+	bitbake core-image-dm
+---
 
 
 
