@@ -1,5 +1,10 @@
-#MACHINE ?= "genericx86"
-MACHINE ?= "qemux86"
+#MACHINE = "qemux86"
+# If there is meta-intel
+MACHINE = "intel-core2-32"
+
+# To save disk space
+#INHERIT += "rm_work"
+
 
 #in distro folder
 DISTRO ?= "hp-dm"

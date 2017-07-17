@@ -6,10 +6,11 @@ FILESEXTRAPATHS_prepend := "${THISDIR}/${PN}-${PV}:"
 
 inherit module
 
-SRCREV = "d584524ea601723a76e45c3dca6bf0271d3d5f65"
-SRC_URI = "git://github.com/gzg1984/NTFS-defused.git \
-file://0001-used-in-yocto.patch  \
-"
+SRCREV = "7d2f245e3b41bf2be40e58fd14f39052388f36cc"
+SRC_URI = "git://github.com/gzg1984/NTFS-defused.git"
+#
+#file://0001-used-in-yocto.patch  \
+#"
 
 
 S = "${WORKDIR}/git"
